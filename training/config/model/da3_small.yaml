@@ -1,0 +1,28 @@
+_target_: src.recon3d.MapGuidedRecon3D
+_recursive_: true
+
+net:
+  _target_: src.fusion_encoder.FusionEncoder
+  name: vits
+  out_layers: [5, 7, 9, 11]
+  alt_start: 4
+  qknorm_start: 4
+  rope_start: 4
+  cat_token: true
+  feature_fusion_layers: [4, 6, 8, 10]
+
+head:
+  _target_: depth_anything_3.model.dualdpt.DualDPT
+  dim_in: 768
+  output_dim: 2
+  features: 64
+  out_channels: [48, 96, 192, 384]
+  head_names: ["depth", "ray"]
+
+cam_enc:
+  _target_: depth_anything_3.model.cam_enc.CameraEnc
+  dim_out: 384
+
+cam_dec:
+  _target_: depth_anything_3.model.cam_dec.CameraDec
+  dim_in: 768

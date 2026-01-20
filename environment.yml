@@ -1,0 +1,6 @@
+name: depthanything3
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+prefix: /home/shun/miniconda3/envs/depthanything3
