@@ -256,12 +256,15 @@ def run_demo(args):
 
         depths.append(depth_t)
 
-    depth_torch = (
-        torch.stack(depths, dim=0)      # (S,H,W)
-        .unsqueeze(0)                 # (1,S,H,W) <- this shape is expected by trainer.
-        #.unsqueeze(2)               # (1,S,1,H,W)
-        .to(device)
-    )
+    if len(depths) > 0:
+        depth_torch = (
+            torch.stack(depths, dim=0)      # (S,H,W)
+            .unsqueeze(0)                 # (1,S,H,W) <- this shape is expected by trainer.
+            #.unsqueeze(2)               # (1,S,1,H,W)
+            .to(device)
+        )
+    else:
+        depth_torch = None
 
     # -----------------------------------------------------
     # 5) Inference
@@ -352,7 +355,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("DA3 demo (config-driven explicit instantiation)")
 
     parser.add_argument("--image", type=str, nargs="+", required=True, help="Input image paths")
-    parser.add_argument("--depth", type=str, nargs="+", default=None, help="Input depth map paths (optional)")
+    parser.add_argument("--depth", type=str, nargs="+", default=[], help="Input depth map paths (optional)")
     parser.add_argument("--config", type=str, required=True, help="DA3 model YAML (e.g. da3_large.yaml)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path (.pt/.pth)")
     parser.add_argument("--outdir", type=str, default="output", help="Output directory")
