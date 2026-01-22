@@ -203,11 +203,16 @@ def run_demo(args):
             state_dict = load_file(args.checkpoint)
         else:
             ckpt = torch.load(args.checkpoint, map_location="cpu")
-            state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+            if "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+            elif "model" in ckpt:
+                state_dict = ckpt["model"]
+            else:
+                state_dict = ckpt
 
         # pick/strip prefixes
-        if any(k.startswith("model.") for k in state_dict.keys()):
-            state_dict = {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")}
+        #if any(k.startswith("model.") for k in state_dict.keys()):
+        #    state_dict = {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")}
 
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         print(f"[INFO] missing={len(missing)}, unexpected={len(unexpected)}")
@@ -253,14 +258,12 @@ def run_demo(args):
             mode="nearest",  # metric depthなら nearest 推奨
         )
         depth_t = depth_t[0, 0]  # (H,W)
-
         depths.append(depth_t)
 
     if len(depths) > 0:
         depth_torch = (
             torch.stack(depths, dim=0)      # (S,H,W)
             .unsqueeze(0)                 # (1,S,H,W) <- this shape is expected by trainer.
-            #.unsqueeze(2)               # (1,S,1,H,W)
             .to(device)
         )
     else:

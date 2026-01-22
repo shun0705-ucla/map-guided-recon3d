@@ -48,8 +48,8 @@ class DepthTokenizer(nn.Module):
     def forward(self, rgb: torch.Tensor, d:torch.Tensor) -> torch.Tensor:
         # reshape inputs for SPNet
         B, S, _, H, W = rgb.shape
-        rgb_flat = rgb.view(B * S, rgb.shape[2], H, W)
-        d_flat = d.view(B * S, H, W).unsqueeze(1)
+        rgb_flat = rgb.reshape(B * S, rgb.shape[2], H, W)
+        d_flat = d.reshape(B * S, H, W).unsqueeze(1)
         valid = (d_flat > 0).type_as(d_flat)
 
         # Get feature from SPNet
@@ -58,7 +58,7 @@ class DepthTokenizer(nn.Module):
 
         # (B*S, Cctx, Hf, Wf) -> (B,S,N,Cctx)
         _, Cctx, Hf, Wf = feat.shape
-        feat = feat.view(B, S, Cctx, Hf, Wf)
+        feat = feat.reshape(B, S, Cctx, Hf, Wf)
         depth_tokens = feat.flatten(3).transpose(2, 3)   # (B,S,N,Cctx)
 
         return depth_tokens

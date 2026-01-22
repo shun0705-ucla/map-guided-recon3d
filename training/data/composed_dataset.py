@@ -17,6 +17,9 @@ from .dataset_util import *
 from .track_util import *
 from .augmentation import get_image_augmentation
 
+_RESNET_MEAN = [0.485, 0.456, 0.406]
+_RESNET_STD = [0.229, 0.224, 0.225]
+
 
 class ComposedDataset(Dataset, ABC):
     """

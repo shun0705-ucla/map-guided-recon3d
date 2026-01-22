@@ -56,13 +56,14 @@ class FusionEncoder(nn.Module):
         )
 
         # for depth_fusion blk
+        #self.fuse_gate = nn.Parameter(torch.tensor(0.0))
         self.depth_fusion_blk = AttentionLayer(
             num_blocks=1,
             dim=self.pretrained.embed_dim,
             num_heads=self.pretrained.embed_dim//64,
             expansion=4.0,
             dropout=0.0,
-            layer_scale=-1.0,
+            layer_scale=1e-5,
             context_dim=self.pretrained.embed_dim,
             use_bias=False,
         )
@@ -87,8 +88,10 @@ class FusionEncoder(nn.Module):
             # depth_fusion if depth_tokens is given
             if depth_tokens is not None and i in self.fusion_layers:
                 #fusion_idx = self.fusion_layers.index(i)
-                #state["x"] = self.depth_fusion_blk(state["x"], depth_tokens)
                 state["x"] = self.cross_attn_batch(state["x"], depth_tokens)
+                #_x = self.cross_attn_batch(state["x"], depth_tokens)
+                #delta = self.cross_attn_batch(state["x"], depth_tokens) - state["x"]
+                #state["x"] = state["x"] + torch.sigmoid(self.fuse_gate) * delta
             
             state, out_x = self.pretrained.process_one_layer(state, **kwargs)
             if i in out_set:

@@ -779,7 +779,7 @@ class Trainer:
         
         return batch
 
-    def _process_batch(self, batch: Mapping):
+    def _process_batch(self, batch: Mapping):      
         if self.data_conf.train.common_config.repeat_batch:
             batch = self._apply_batch_repetition(batch)
         
@@ -790,15 +790,14 @@ class Trainer:
                 cam_points=batch["cam_points"],
                 world_points=batch["world_points"],
                 depths=batch["depths"],
-                scale_extri_only=False,
                 point_masks=batch["point_masks"],
             )
 
         # Replace the original values in the batch with the normalized ones.
-        batch["extrinsics"] = normalized_extrinsics
-        batch["cam_points"] = normalized_cam_points
-        batch["world_points"] = normalized_world_points
-        batch["depths"] = normalized_depths
+        #batch["extrinsics"] = normalized_extrinsics
+        #batch["cam_points"] = normalized_cam_points
+        #batch["world_points"] = normalized_world_points
+        #batch["depths"] = normalized_depths
 
         return batch
 
@@ -810,7 +809,6 @@ class Trainer:
             A dictionary containing the computed losses.
         """
         # Forward pass
-        #y_hat = model(images=batch["images"], intrinsics=batch["intrinsics"])
         y_hat = model(x=batch["images"],d=batch["depths"])
         if "depth" in y_hat and y_hat["depth"].dim() == 4:
             y_hat["depth"] = y_hat["depth"][..., None]  # add C=1

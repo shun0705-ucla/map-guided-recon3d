@@ -4,13 +4,13 @@ defaults:
   - _self_
 
 exp_name: exp001
-img_size: 448 #518
+img_size: 224 #518
 num_workers: 4
 seed_value: 38
 accum_steps: 1    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
 patch_size: 14
 val_epoch_freq: 5
-max_img_per_gpu: 24
+max_img_per_gpu: 6
 # img_size:224^2 / accum_steps:2 * max_img_per_gpu: 48 = VRAM:13GB
 
 limit_train_batches: 800
@@ -35,18 +35,18 @@ data:
           split: train
           len_train: 1000
           len_test: 100
-          # TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
-          TartanAir_DIR: ../dataset/TartanAir
+          TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
+          # TartanAir_DIR: ../dataset/TartanAir
         #- _target_: data.datasets.tartanair_synthe.TartanAirSyntheDataset
         #  split: train
         #  len_train: 10000
         #  len_test: 100
         #  TartanAir_DIR: ../dataset/TartanAir_Synthe
-        - _target_: data.datasets.vkitti.VKittiDataset
-          split: train
-          len_train: 10000
-          len_test: 100
-          VKitti_DIR: ../dataset/vkitti
+        #- _target_: data.datasets.vkitti.VKittiDataset
+        #  split: train
+        #  len_train: 10000
+        #  len_test: 100
+        #  VKitti_DIR: ../dataset/vkitti
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
     num_workers: ${num_workers}
@@ -62,8 +62,8 @@ data:
           split: test
           len_train: 100
           len_test: 10
-          # TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
-          TartanAir_DIR: ../dataset/TartanAir
+          TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
+          # TartanAir_DIR: ../dataset/TartanAir
 
 
 logging:

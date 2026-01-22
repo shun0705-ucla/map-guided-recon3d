@@ -18,6 +18,9 @@ from depth_anything_3.utils.alignment import (
 from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous, map_pdf_to_opacity
 from depth_anything_3.utils.ray_utils import get_extrinsic_from_camray
 
+_RESNET_MEAN = [0.485, 0.456, 0.406]
+_RESNET_STD = [0.229, 0.224, 0.225]
+
 # (Optional) if you later want to construct DA3 backbone/head explicitly in demo.py:
 # from depth_anything_3.model.dinov2.dinov2 import DinoV2
 # from depth_anything_3.model.dualdpt import DualDPT
@@ -91,6 +94,12 @@ class MapGuidedRecon3D(nn.Module):
         if depth_tokenizer is not None:
             self.depth_tokenizer = depth_tokenizer if isinstance(depth_tokenizer, nn.Module) else create_object(_wrap_cfg(depth_tokenizer))
 
+        # Register normalization constants as buffers
+        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
+            self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
+        self.depth_clip_max = 250.0 # [m]
+        self.depth_clip_min = 0.1 # [m]
+
     def forward(
         self,
         x: torch.Tensor,
@@ -107,7 +116,7 @@ class MapGuidedRecon3D(nn.Module):
 
         Args:
             x: Input images (B, N, 3, H, W)
-            d: Input depth maps (B, N, 1, H, W)
+            d: Input depth maps (B, N, H, W)
             extrinsics: Camera extrinsics (B, N, 4, 4) 
             intrinsics: Camera intrinsics (B, N, 3, 3) 
             feat_layers: List of layer indices to extract features from
@@ -123,9 +132,14 @@ class MapGuidedRecon3D(nn.Module):
 
         # depth is optional. if depth_tokens is None, fusion_encoder will be a standard vit encoder.
         if d is not None and self.depth_tokenizer is not None:
+            # SPNet expects rgb without RESNET normalization and normalized depth
+            d = torch.clamp(d, min=self.depth_clip_min, max=self.depth_clip_max)
             depth_tokens = self.depth_tokenizer(x, d)
         else:
             depth_tokens = None
+        
+        # Normalize RESNET mean/std
+        x = (x - self._resnet_mean) / self._resnet_std
 
         # Extract features using backbone
         if extrinsics is not None:
