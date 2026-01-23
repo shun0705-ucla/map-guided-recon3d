@@ -63,7 +63,7 @@ class FusionEncoder(nn.Module):
             num_heads=self.pretrained.embed_dim//64,
             expansion=4.0,
             dropout=0.0,
-            layer_scale=1e-5,
+            layer_scale=-1,
             context_dim=self.pretrained.embed_dim,
             use_bias=False,
         )

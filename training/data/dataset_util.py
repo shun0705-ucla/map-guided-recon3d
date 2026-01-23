@@ -734,4 +734,3 @@ def robust_avg_depth_with_mask(depth_f32: np.ndarray, valid_mask: np.ndarray, tr
     lo = int(trim_frac * len(d64))
     hi = max(lo + 1, int((1.0 - trim_frac) * len(d64)))
     return np.float32(d64[lo:hi].mean())
-

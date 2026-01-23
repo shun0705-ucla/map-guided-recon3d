@@ -257,6 +257,7 @@ class TartanAirDataset(BaseDataset):
                 logging.error(f"Wrong shape for {seq_name}: expected {target_image_shape}, got {image.shape[:2]}")
                 continue
 
+
             images.append(image)
             depths.append(depth_map)
             extrinsics.append(extri_opencv)

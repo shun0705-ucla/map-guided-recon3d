@@ -46,6 +46,9 @@ class MultitaskLoss(torch.nn.Module):
         """
         total_loss = 0
         loss_dict = {}
+
+        #print(predictions.keys())
+        #print(batch.keys())
         
         # Camera pose loss - if pose encodings are predicted
         if "pose_enc_list" in predictions:
@@ -270,8 +273,7 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
     # NOTE: we put conf inside regression_loss so that we can also apply conf loss to the gradient loss in a multi-scale manner
     # this is hacky, but very easier to implement
     loss_conf, loss_grad, loss_reg = regression_loss(pred_depth, gt_depth, gt_depth_mask, conf=pred_depth_conf,
-                                             gradient_loss_fn=gradient_loss_fn, gamma=gamma, alpha=alpha, valid_range=valid_range,
-                                             loss_type="logL1")
+                                             gradient_loss_fn=gradient_loss_fn, gamma=gamma, alpha=alpha, valid_range=valid_range)
 
     loss_dict = {
         f"loss_conf_depth": loss_conf,
@@ -282,8 +284,7 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
     return loss_dict
 
 
-def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0, alpha=0.2, valid_range=-1,
-                    loss_type=None, ssi_align=True, ssi_use_conf=True):
+def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0, alpha=0.2, valid_range=-1):
     """
     Core regression loss function with confidence weighting and optional gradient loss.
     
@@ -342,82 +343,66 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
         a = cov_gp / (var_g + eps)
         b = mu_p - a * mu_g
         return a, b
-
     
     bb, ss, hh, ww, nc = pred.shape
 
-    # ---------- 1) log space ----------
-    if loss_type == "logL1":
-        u_pred = torch.log(torch.clamp(pred, min=1e-6))
-        u_gt   = torch.log(torch.clamp(gt,   min=1e-6))
-
-        if ssi_align:
-            # ---------- 2) per (B,S) affine alignment in log space ----------
-            w = conf if (ssi_use_conf and conf is not None) else None
-            a, b = _fit_affine_per_sample(u_gt, u_pred, mask, weight=w)
-            u_gt = a * u_gt + b
-
-        pred_used = u_pred
-        gt_used   = u_gt
-    else:
-        pred_used = pred
-        gt_used   = gt
-
-    # ---------- 3) regression residual ----------
-    # Compute L2 distance between predicted and aligned ground truth
-    loss_reg = torch.norm(gt_used[mask] - pred_used[mask], dim=-1)
+    # Compute L2 distance between predicted and ground truth points
+    loss_reg = torch.norm(gt[mask] - pred[mask], dim=-1)
     loss_reg = check_and_fix_inf_nan(loss_reg, "loss_reg")
 
-    # ---------- 4) confidence-weighted loss ----------
-    # (元コードが conf 前提なので、Noneなら 1 とみなす)
-    if conf is None:
-        conf_masked = torch.ones_like(mask, dtype=pred.dtype, device=pred.device)[mask]
-        loss_conf = gamma * loss_reg * conf_masked
-    else:
-        loss_conf = gamma * loss_reg * conf[mask] - alpha * torch.log(conf[mask])
+    # Confidence-weighted loss: gamma * loss * conf - alpha * log(conf)
+    # This encourages the model to be confident on easy examples and less confident on hard ones
+    loss_conf = gamma * loss_reg * conf[mask] - alpha * torch.log(conf[mask])
     loss_conf = check_and_fix_inf_nan(loss_conf, "loss_conf")
-
-    # ---------- 5) gradient loss (同じ空間で) ----------
+        
+    # Initialize gradient loss
     loss_grad = 0
-    if gradient_loss_fn is None:
-        gradient_loss_fn = ""
 
-    if "conf" in gradient_loss_fn and conf is not None:
-        to_feed_conf = conf.reshape(bb * ss, hh, ww)
+    # Prepare confidence for gradient loss if needed
+    if "conf" in gradient_loss_fn:
+        to_feed_conf = conf.reshape(bb*ss, hh, ww)
     else:
         to_feed_conf = None
 
+    # Compute gradient loss if specified for spatial smoothness
     if "normal" in gradient_loss_fn:
+        # Surface normal-based gradient loss
         loss_grad = gradient_loss_multi_scale_wrapper(
-            pred_used.reshape(bb * ss, hh, ww, nc),
-            gt_used.reshape(bb * ss, hh, ww, nc),
-            mask.reshape(bb * ss, hh, ww),
+            pred.reshape(bb*ss, hh, ww, nc),
+            gt.reshape(bb*ss, hh, ww, nc),
+            mask.reshape(bb*ss, hh, ww),
             gradient_loss_fn=normal_loss,
             scales=3,
             conf=to_feed_conf,
         )
     elif "grad" in gradient_loss_fn:
+        # Standard gradient-based loss
         loss_grad = gradient_loss_multi_scale_wrapper(
-            pred_used.reshape(bb * ss, hh, ww, nc),
-            gt_used.reshape(bb * ss, hh, ww, nc),
-            mask.reshape(bb * ss, hh, ww),
+            pred.reshape(bb*ss, hh, ww, nc),
+            gt.reshape(bb*ss, hh, ww, nc),
+            mask.reshape(bb*ss, hh, ww),
             gradient_loss_fn=gradient_loss,
             conf=to_feed_conf,
         )
 
-    # ---------- 6) reduce (outlier filtering) ----------
+    # Process confidence-weighted loss
     if loss_conf.numel() > 0:
-        if valid_range > 0:
+        # Filter out outliers using quantile-based thresholding
+        if valid_range>0:
             loss_conf = filter_by_quantile(loss_conf, valid_range)
-        loss_conf = check_and_fix_inf_nan(loss_conf, "loss_conf_depth")
+
+        loss_conf = check_and_fix_inf_nan(loss_conf, f"loss_conf_depth")
         loss_conf = loss_conf.mean()
     else:
         loss_conf = (0.0 * pred).mean()
 
+    # Process regular regression loss
     if loss_reg.numel() > 0:
-        if valid_range > 0:
+        # Filter out outliers using quantile-based thresholding
+        if valid_range>0:
             loss_reg = filter_by_quantile(loss_reg, valid_range)
-        loss_reg = check_and_fix_inf_nan(loss_reg, "loss_reg_depth")
+
+        loss_reg = check_and_fix_inf_nan(loss_reg, f"loss_reg_depth")
         loss_reg = loss_reg.mean()
     else:
         loss_reg = (0.0 * pred).mean()

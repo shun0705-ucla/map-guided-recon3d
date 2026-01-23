@@ -25,7 +25,7 @@ import logging
 import math
 import time
 from datetime import timedelta
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
@@ -794,10 +794,10 @@ class Trainer:
             )
 
         # Replace the original values in the batch with the normalized ones.
-        #batch["extrinsics"] = normalized_extrinsics
-        #batch["cam_points"] = normalized_cam_points
-        #batch["world_points"] = normalized_world_points
-        #batch["depths"] = normalized_depths
+        batch["extrinsics"] = normalized_extrinsics
+        batch["cam_points"] = normalized_cam_points
+        batch["world_points"] = normalized_world_points
+        batch["depths"] = normalized_depths
 
         return batch
 
@@ -808,8 +808,50 @@ class Trainer:
         Returns:
             A dictionary containing the computed losses.
         """
+        @torch.no_grad()
+        def _make_sparse_depths_torch(
+            depths: torch.Tensor,                 # (B,S,H,W) or (B,S,H,W,1)
+            ratio: float = 0.1,
+            valid_mask: Optional[torch.Tensor] = None,  # (B,S,H,W) bool
+            keep_value: float = 0.0,
+            return_mask: bool = True,
+            generator: Optional[torch.Generator] = None,
+        ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+            """
+            Create sparse depth maps by random pixel sampling (Bernoulli).
+            Returns:
+            sparse_depths: same shape as depths (without last singleton if provided)
+            sparse_mask: (B,S,H,W) bool (optional)
+            """
+            assert 0.0 < ratio <= 1.0
+            if depths.dim() == 5 and depths.size(-1) == 1:
+                depths_ = depths[..., 0]
+            else:
+                depths_ = depths
+            assert depths_.dim() == 4, f"depths must be (B,S,H,W) (got {depths_.shape})"
+
+            if valid_mask is None:
+                valid_mask = depths_ > 0
+
+            # random keep mask
+            r = torch.rand(valid_mask.shape, device=depths_.device, generator=generator)
+            keep_mask = (r < ratio) & valid_mask
+
+            sparse = torch.full_like(depths_, fill_value=keep_value)
+            sparse[keep_mask] = depths_[keep_mask]
+
+            if return_mask:
+                return sparse, keep_mask
+            return sparse, None
+
         # Forward pass
-        y_hat = model(x=batch["images"],d=batch["depths"])
+        sparse_depths, sparse_mask = _make_sparse_depths_torch(
+            depths=batch["depths"],
+            ratio=0.01,
+            valid_mask=batch["point_masks"],   # 無ければ depths>0 が使われる
+            return_mask=True,
+        )
+        y_hat = model(x=batch["images"],d=sparse_depths)
         if "depth" in y_hat and y_hat["depth"].dim() == 4:
             y_hat["depth"] = y_hat["depth"][..., None]  # add C=1
 

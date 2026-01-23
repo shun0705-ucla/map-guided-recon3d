@@ -117,7 +117,7 @@ loss:
     weight_rot: 5.0
   depth:
     weight: 1.0
-    gradient_loss_fn: "grad" #"unuse" 
+    gradient_loss_fn: "unuse" #"grad" 
     valid_range: 0.98
     inv_depth_only: True
   point: null
@@ -145,6 +145,7 @@ optim:
     - "*depth_tokenizer*"
     - "*head*"
     - "*pretrained*"
+    #- "*depth_fusion_blk*"
       #- "*aggregator*"  # example, freeze the aggregator
       #- "encoder*"
       #- "camera_embed*"
