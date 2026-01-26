@@ -81,7 +81,7 @@ class TartanAirDataset(BaseDataset):
         self.sequence_list = sequence_list
         self.sequence_list_len = len(self.sequence_list)
 
-        self.depth_max = 80
+        self.depth_max = 250.0
 
         '''
         # prepare camera endpoint.txt

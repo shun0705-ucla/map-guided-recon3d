@@ -80,7 +80,7 @@ class VKittiDataset(BaseDataset):
         self.sequence_list = sequence_list
         self.sequence_list_len = len(self.sequence_list)
 
-        self.depth_max = 80
+        self.depth_max = 250.0
 
         status = "Training" if self.training else "Testing"
         logging.info(f"{status}: VKitti Real Data size: {self.sequence_list_len}")

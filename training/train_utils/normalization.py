@@ -98,9 +98,11 @@ def normalize_camera_extrinsics_and_points_batch(
         new_depths = depths.clone()
 
         dist = new_world_points.norm(dim=-1)
+        #dist = cam_points.norm(dim=-1)
         dist_sum = (dist * point_masks).sum(dim=[1,2,3])
         valid_count = point_masks.sum(dim=[1,2,3])
         avg_scale = (dist_sum / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)
+        #print("scale:",avg_scale)
 
 
         new_world_points = new_world_points / avg_scale.view(-1, 1, 1, 1, 1)

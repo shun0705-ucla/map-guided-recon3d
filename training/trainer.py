@@ -26,6 +26,7 @@ import math
 import time
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+import cv2
 
 import torch
 import torch.distributed as dist
@@ -566,58 +567,62 @@ class Trainer:
             with torch.cuda.amp.autocast(enabled=False):
                 batch = self._process_batch(batch)
 
-
-
-            '''
             ################################# inside your training loop
-            save_dir = "debug_batches"
-            os.makedirs(save_dir, exist_ok=True)
-            if "images" in batch and batch["images"].numel() > 0:
-                imgs = batch["images"].detach().cpu()   # [B, S, C, H, W] or [B, C, H, W]
-
-                if imgs.dim() == 5:   # [B, S, C, H, W]
+            save_debug_batches = False
+            if save_debug_batches:
+                save_dir = "debug_batches"
+                os.makedirs(save_dir, exist_ok=True)
+                if "images" in batch and batch["images"].numel() > 0:
+                    imgs = batch["images"].detach().cpu()   # [B, S, C, H, W] or [B, C, H, W]
                     B, S, C, H, W = imgs.shape
-                    for b in range(min(B, 2)):      # just save a couple to avoid spam
+                    for b in range(min(B, 6)):      # just save a couple to avoid spam
                         for s in range(min(S, 10)):  # save first few frames
                             fn = os.path.join(save_dir, f"iter{data_iter:05d}_b{b}_s{s}.png")
                             vutils.save_image(imgs[b, s], fn)
-                elif imgs.dim() == 4: # [B, C, H, W]
-                    B, C, H, W = imgs.shape
-                    for b in range(min(B, 4)):
-                        fn = os.path.join(save_dir, f"iter{data_iter:05d}_b{b}.png")
-                        vutils.save_image(imgs[b], fn)
-                print(f"Saved images for iter {data_iter}")
-            if "depths" in batch and batch["depths"].numel() > 0:
-                depths = batch["depths"].detach().cpu()  # [B, S, 1, H, W] or [B, 1, H, W]
-                if depths.dim() == 5:   # [B, S, 1, H, W]
-                    B, S, _, H, W = depths.shape
-                    for b in range(min(B, 2)):
-                        for s in range(min(S, 10)):
-                            depth = depths[b, s, 0].numpy()
-                            np.save(os.path.join(save_dir, f"iter{data_iter:05d}_b{b}_s{s}_depth.npy"), depth)
-                elif depths.dim() == 4: # [B, S, H, W]
+                    print(f"Saved images for iter {data_iter}")
+                if "depths" in batch and batch["depths"].numel() > 0:
+                    depths = batch["depths"].detach().cpu()  # [B, S, H, W]
                     B, S, H, W = depths.shape
-                    for b in range(min(B, 4)):
+
+                    for b in range(min(B, 6)):
                         for s in range(min(S, 10)):
-                            depth = depths[b, s].numpy()
-                            np.save(os.path.join(save_dir, f"iter{data_iter:05d}_b{b}_s{s}_depth.npy"), depth)
-            if "point_masks" in batch and batch["point_masks"].numel() > 0:
-                masks = batch["point_masks"].detach().cpu()  # [B, S, 1, H, W] or [B, 1, H, W]
-                if masks.dim() == 5:   # [B, S, 1, H, W]
-                    B, S, _, H, W = masks.shape
-                    for b in range(min(B, 2)):
-                        for s in range(min(S, 10)):
-                            mask = masks[b, s, 0].numpy()
-                            np.save(os.path.join(save_dir, f"iter{data_iter:05d}_b{b}_s{s}_mask.npy"), mask)
-                elif masks.dim() == 4: # [B, S, H, W]
+                            depth = depths[b, s].numpy()  # [H, W]
+
+                            # consider valid depth only
+                            valid = depth > 0
+                            depth_norm = np.zeros_like(depth)
+
+                            if valid.any():
+                                dmin, dmax = depth[valid].min(), depth[valid].max()
+                                depth_norm[valid] = (depth[valid] - dmin) / (dmax - dmin + 1e-6)
+
+                            depth_u8 = (depth_norm * 255).astype(np.uint8)
+
+                            depth_color = cv2.applyColorMap(
+                                depth_u8, cv2.COLORMAP_VIRIDIS
+                            )
+
+                            fn = os.path.join(
+                                save_dir, f"iter{data_iter:05d}_b{b}_s{s}_depth.png"
+                            )
+                            cv2.imwrite(fn, depth_color)
+
+                if "point_masks" in batch and batch["point_masks"].numel() > 0:
+                    masks = batch["point_masks"].detach().cpu()  # [B, S, H, W]
                     B, S, H, W = masks.shape
-                    for b in range(min(B, 4)):
+
+                    for b in range(min(B, 6)):
                         for s in range(min(S, 10)):
-                            mask = masks[b, s].numpy()
-                            np.save(os.path.join(save_dir, f"iter{data_iter:05d}_b{b}_s{s}_mask.npy"), mask)
-            
-            #####################################################################
-            '''
+                            mask = masks[b, s].numpy()  # [H, W]
+
+                            mask_u8 = (mask > 0).astype(np.uint8) * 255
+
+                            fn = os.path.join(
+                                save_dir, f"iter{data_iter:05d}_b{b}_s{s}_mask.png"
+                            )
+                            cv2.imwrite(fn, mask_u8)
+                            
+
 
             
 
@@ -630,9 +635,45 @@ class Trainer:
             else:
                 chunked_batches = chunk_batch_for_accum_steps(batch, accum_steps)
 
-            self._run_steps_on_batch_chunks(
+            predictions = self._run_steps_on_batch_chunks(
                 chunked_batches, phase, loss_meters
             )
+            
+            #####################################################################
+            if save_debug_batches: # debug output
+                if "depth" in predictions and predictions["depth"].numel() > 0:
+                    pred_depths = predictions["depth"].detach().cpu()  # [B, S, H, W, 1]
+                    pred_depths = pred_depths.squeeze(-1)              # [B, S, H, W]
+
+                    B, S, H, W = pred_depths.shape
+
+                    for b in range(min(B, 6)):
+                        for s in range(min(S, 10)):
+                            depth = pred_depths[b, s].numpy()  # [H, W]
+
+                            # consider valid depth only (positive)
+                            valid = depth > 0
+                            depth_norm = np.zeros_like(depth)
+
+                            if valid.any():
+                                dmin, dmax = depth[valid].min(), depth[valid].max()
+                                depth_norm[valid] = (depth[valid] - dmin) / (dmax - dmin + 1e-6)
+
+                            depth_u8 = (depth_norm * 255).astype(np.uint8)
+
+                            depth_color = cv2.applyColorMap(
+                                depth_u8, cv2.COLORMAP_VIRIDIS
+                            )
+
+                            fn = os.path.join(
+                                save_dir, f"iter{data_iter:05d}_b{b}_s{s}_pred_depth.png"
+                            )
+                            cv2.imwrite(fn, depth_color)
+
+                    print(f"Saved predicted depth maps for iter {data_iter}")
+
+
+
 
             # compute gradient and do SGD step
             assert data_iter <= limit_train_batches  # allow for off by one errors
@@ -736,7 +777,7 @@ class Trainer:
                     enabled=self.optim_conf.amp.enabled,
                     dtype=amp_type,
                 ):
-                    loss_dict = self._step(
+                    y_hat, loss_dict = self._step(
                         chunked_batch, self.model, phase, loss_meters
                     )
 
@@ -753,6 +794,7 @@ class Trainer:
                 loss /= accum_steps
                 self.scaler.scale(loss).backward()
                 loss_meters[loss_key].update(loss.item(), batch_size)
+        return y_hat
 
 
     def _apply_batch_repetition(self, batch: Mapping) -> Mapping:
@@ -811,7 +853,7 @@ class Trainer:
         @torch.no_grad()
         def _make_sparse_depths_torch(
             depths: torch.Tensor,                 # (B,S,H,W) or (B,S,H,W,1)
-            ratio: float = 0.1,
+            ratio: float = 0.99,
             valid_mask: Optional[torch.Tensor] = None,  # (B,S,H,W) bool
             keep_value: float = 0.0,
             return_mask: bool = True,
@@ -847,7 +889,7 @@ class Trainer:
         # Forward pass
         sparse_depths, sparse_mask = _make_sparse_depths_torch(
             depths=batch["depths"],
-            ratio=0.01,
+            ratio=0.1,
             valid_mask=batch["point_masks"],   # 無ければ depths>0 が使われる
             return_mask=True,
         )
@@ -865,7 +907,7 @@ class Trainer:
         self._log_tb_visuals(log_data, phase, self.steps[phase])
 
         self.steps[phase] += 1
-        return loss_dict
+        return y_hat, loss_dict
 
     def _update_and_log_scalars(self, data: Mapping, phase: str, step: int, loss_meters: dict):
         """Updates average meters and logs scalar values to TensorBoard."""

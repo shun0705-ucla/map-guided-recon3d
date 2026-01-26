@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from depth_anything_3.model.utils.transform import extri_intri_to_pose_encoding
 from train_utils.general import check_and_fix_inf_nan
 from math import ceil, floor
+from depth_anything_3.utils.geometry import unproject_depth
 
 
 @dataclass(eq=False)
@@ -25,13 +26,14 @@ class MultitaskLoss(torch.nn.Module):
     - Point loss
     - Tracking loss (not cleaned yet, dirty code is at the bottom of this file)
     """
-    def __init__(self, camera=None, depth=None, point=None, track=None, **kwargs):
+    def __init__(self, camera=None, depth=None, point=None, track=None, world_size=None, **kwargs):
         super().__init__()
         # Loss configuration dictionaries for each task
         self.camera = camera
         self.depth = depth
         self.point = point
         self.track = track
+        self.world_size = world_size
 
     def forward(self, predictions, batch) -> torch.Tensor:
         """
@@ -44,14 +46,75 @@ class MultitaskLoss(torch.nn.Module):
         Returns:
             Dict containing individual losses and total objective
         """
+        def _world_point_size(pred_dict, batch_data):
+            def l2_norm_points(points, mask):
+                # mask: (B,S,H,W) or (B,S,H,W,1)
+                if mask.dim() == 5 and mask.shape[-1] == 1:
+                    mask = mask.squeeze(-1)
+                mask = mask.to(points.dtype)
+
+                dist = points.norm(dim=-1)                          # (B,S,H,W)
+                dist_sum = (dist * mask).sum(dim=(1,2,3))           # (B,)
+                valid_count = mask.sum(dim=(1,2,3)).clamp_min(1.0)  # (B,)
+                avg_scale = dist_sum / valid_count                  # (B,)
+                return avg_scale.clamp(min=1e-6, max=1e6)
+
+            pred_depth = pred_dict["depth"]         # (B,S,H,W,1)
+            pred_intrinsics = pred_dict["intrinsics"]
+            pred_extrinsics = pred_dict["extrinsics"]
+
+            pred_world_points = unproject_depth(pred_depth, pred_intrinsics, c2w=pred_extrinsics)  # (B,S,H,W,3)
+            pred_dict["world_points"] = pred_world_points
+
+            pred_world_scale = l2_norm_points(pred_world_points, batch_data["point_masks"]).clamp(1e-3, 1e3)  # (B,)
+            pred_dict["world_size"] = pred_world_scale  # IMPORTANT: keep graph
+
+            return pred_dict
+        
+        def _rescale_world_size(pred_dict, batch_data, scale):
+            pred_depth = pred_dict["depth"]          # (B,S,H,W,1)
+            pred_intrinsics = pred_dict["intrinsics"]
+            pred_extrinsics = pred_dict["extrinsics"]
+            pred_world_points = pred_dict["world_points"]
+
+            B, S = pred_depth.shape[:2]
+            scale_b = scale.view(B, 1, 1, 1, 1)
+
+            pred_dict["depth"] = pred_depth / scale_b
+            pred_dict["world_points"] = pred_world_points / scale_b
+
+            # scale translation only
+            scale_bs = scale[:, None, None].expand(B, S, 1)                    # (B,S,1)
+            t = pred_extrinsics[:, :, :3, 3:4] / scale_bs[:, :, None, :]       # (B,S,3,1)
+            scaled_extrinsics = pred_extrinsics.clone()
+            scaled_extrinsics[:, :, :3, 3:4] = t
+            pred_dict["extrinsics"] = scaled_extrinsics
+
+            pred_dict["pose_enc"] = extri_intri_to_pose_encoding(
+                scaled_extrinsics, pred_intrinsics, batch_data['images'].shape[-2:]
+            )
+            return pred_dict
+
+        
         total_loss = 0
         loss_dict = {}
 
-        #print(predictions.keys())
-        #print(batch.keys())
-        
+        ############ scale pred_world with (gt_world_size) / (pred_world_size) ###############
+        # pred_world_size depends on da3 teacher model prediction
+        # gt_world_size is calculated from points l2 norm in the 1st cam axis
+        # This scale mismatch causes depth loss increase even provided nice relative shape.
+        predictions = _world_point_size(predictions, batch)
+        predictions = _rescale_world_size(predictions, batch, predictions["world_size"])
+
+        # world_size loss: world_size should be 1.0
+        if "world_size" in predictions:
+            ws = predictions["world_size"]  # (B,)
+            world_size_loss = ((ws - 1.0) ** 2).mean()
+            loss_dict["loss_world_size"] = world_size_loss * self.world_size["weight"]
+            total_loss = total_loss + loss_dict["loss_world_size"]
+
         # Camera pose loss - if pose encodings are predicted
-        if "pose_enc_list" in predictions:
+        if "pose_enc" in predictions:
             camera_loss_dict = compute_camera_loss(predictions, batch, **self.camera)   
             camera_loss = camera_loss_dict["loss_camera"] * self.camera["weight"]   
             total_loss = total_loss + camera_loss
@@ -65,8 +128,9 @@ class MultitaskLoss(torch.nn.Module):
             total_loss = total_loss + depth_loss
             loss_dict.update(depth_loss_dict)
 
-        # 3D point reconstruction loss - if world points are predicted
-        if "world_points" in predictions:
+        # 3D point reconstruction loss
+        #if "world_points" in predictions:
+        if False:
             point_loss_dict = compute_point_loss(predictions, batch, **self.point)
             point_loss = point_loss_dict["loss_conf_point"] + point_loss_dict["loss_reg_point"] + point_loss_dict["loss_grad_point"]
             point_loss = point_loss * self.point["weight"]
@@ -88,7 +152,6 @@ def compute_camera_loss(
     pred_dict,              # predictions dict, contains pose encodings
     batch_data,             # ground truth and mask batch dict
     loss_type="l1",         # "l1" or "l2" loss
-    gamma=0.6,              # temporal decay weight for multi-stage training
     pose_encoding_type="absT_quaR_FoV",
     weight_trans=1.0,       # weight for translation loss
     weight_rot=1.0,         # weight for rotation loss
@@ -96,13 +159,11 @@ def compute_camera_loss(
     **kwargs
 ):
     # List of predicted pose encodings per stage
-    pred_pose_encodings = pred_dict['pose_enc_list']
+    pred_pose_encoding = pred_dict['pose_enc']
     # Binary mask for valid points per frame (B, N, H, W)
     point_masks = batch_data['point_masks']
     # Only consider frames with enough valid points (>100)
     valid_frame_mask = point_masks[:, 0].sum(dim=[-1, -2]) > 100
-    # Number of prediction stages
-    n_stages = len(pred_pose_encodings)
 
     # Get ground truth camera extrinsics and intrinsics
     gt_extrinsics = batch_data['extrinsics']
@@ -111,53 +172,30 @@ def compute_camera_loss(
 
     # Encode ground truth pose to match predicted encoding format
     gt_pose_encoding = extri_intri_to_pose_encoding(
-        gt_extrinsics, gt_intrinsics, image_hw, pose_encoding_type=pose_encoding_type
-    )
+        gt_extrinsics, gt_intrinsics, image_hw)
 
-    # Initialize loss accumulators for translation, rotation, focal length
-    total_loss_T = total_loss_R = total_loss_FL = 0
-
-    # Compute loss for each prediction stage with temporal weighting
-    for stage_idx in range(n_stages):
-        # Later stages get higher weight (gamma^0 = 1.0 for final stage)
-        stage_weight = gamma ** (n_stages - stage_idx - 1)
-        pred_pose_stage = pred_pose_encodings[stage_idx]
-
-        if valid_frame_mask.sum() == 0:
-            # If no valid frames, set losses to zero to avoid gradient issues
-            loss_T_stage = (pred_pose_stage * 0).mean()
-            loss_R_stage = (pred_pose_stage * 0).mean()
-            loss_FL_stage = (pred_pose_stage * 0).mean()
-        else:
-            # Only consider valid frames for loss computation
-            loss_T_stage, loss_R_stage, loss_FL_stage = camera_loss_single(
-                pred_pose_stage[valid_frame_mask].clone(),
-                gt_pose_encoding[valid_frame_mask].clone(),
-                loss_type=loss_type
+    if valid_frame_mask.sum() == 0:
+        # If no valid frames, set losses to zero to avoid gradient issues
+        loss_T = 0.0
+        loss_R = 0.0
+        loss_FoV = 0.0
+    else:
+        # Only consider valid frames for loss computation
+        loss_T, loss_R, loss_FoV = camera_loss_single(
+            pred_pose_encoding[valid_frame_mask].clone(),
+            gt_pose_encoding[valid_frame_mask].clone(),
+            loss_type=loss_type
             )
-        # Accumulate weighted losses across stages
-        total_loss_T += loss_T_stage * stage_weight
-        total_loss_R += loss_R_stage * stage_weight
-        total_loss_FL += loss_FL_stage * stage_weight
-
-    # Average over all stages
-    avg_loss_T = total_loss_T / n_stages
-    avg_loss_R = total_loss_R / n_stages
-    avg_loss_FL = total_loss_FL / n_stages
 
     # Compute total weighted camera loss
-    total_camera_loss = (
-        avg_loss_T * weight_trans +
-        avg_loss_R * weight_rot +
-        avg_loss_FL * weight_focal
-    )
+    total_camera_loss = (loss_T * weight_trans + loss_R * weight_rot + loss_FoV * weight_focal)
 
     # Return loss dictionary with individual components
     return {
         "loss_camera": total_camera_loss,
-        "loss_T": avg_loss_T,
-        "loss_R": avg_loss_R,
-        "loss_FL": avg_loss_FL
+        "loss_T": loss_T,
+        "loss_R": loss_R,
+        "loss_FoV": loss_FoV
     }
 
 def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
@@ -171,7 +209,7 @@ def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
     Returns:
         loss_T: translation loss (mean)
         loss_R: rotation loss (mean)
-        loss_FL: focal length/intrinsics loss (mean)
+        loss_FoV: focal length/intrinsics loss (mean)
     
     NOTE: The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.
         So here we use l1 loss.
@@ -180,26 +218,26 @@ def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
         # Translation: first 3 dims; Rotation: next 4 (quaternion); Focal/Intrinsics: last dims
         loss_T = (pred_pose_enc[..., :3] - gt_pose_enc[..., :3]).abs()
         loss_R = (pred_pose_enc[..., 3:7] - gt_pose_enc[..., 3:7]).abs()
-        loss_FL = (pred_pose_enc[..., 7:] - gt_pose_enc[..., 7:]).abs()
+        loss_FoV = (pred_pose_enc[..., 7:] - gt_pose_enc[..., 7:]).abs()
     elif loss_type == "l2":
         # L2 norm for each component
         loss_T = (pred_pose_enc[..., :3] - gt_pose_enc[..., :3]).norm(dim=-1, keepdim=True)
         loss_R = (pred_pose_enc[..., 3:7] - gt_pose_enc[..., 3:7]).norm(dim=-1)
-        loss_FL = (pred_pose_enc[..., 7:] - gt_pose_enc[..., 7:]).norm(dim=-1)
+        loss_FoV = (pred_pose_enc[..., 7:] - gt_pose_enc[..., 7:]).norm(dim=-1)
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
     # Check/fix numerical issues (nan/inf) for each loss component
     loss_T = check_and_fix_inf_nan(loss_T, "loss_T")
     loss_R = check_and_fix_inf_nan(loss_R, "loss_R")
-    loss_FL = check_and_fix_inf_nan(loss_FL, "loss_FL")
+    loss_FoV = check_and_fix_inf_nan(loss_FoV, "loss_FoV")
 
     # Clamp outlier translation loss to prevent instability, then average
     loss_T = loss_T.clamp(max=100).mean()
     loss_R = loss_R.mean()
-    loss_FL = loss_FL.mean()
+    loss_FoV = loss_FoV.mean()
 
-    return loss_T, loss_R, loss_FL
+    return loss_T, loss_R, loss_FoV
 
 
 def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn = None, valid_range=-1, **kwargs):
@@ -215,7 +253,8 @@ def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
         valid_range: Quantile range for outlier filtering
     """
     pred_points = predictions['world_points']
-    pred_points_conf = predictions['world_points_conf']
+    #pred_points_conf = predictions['world_points_conf']
+    pred_points_conf = predictions['depth_conf']
     gt_points = batch['world_points']
     gt_points_mask = batch['point_masks']
     
@@ -280,6 +319,23 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
         f"loss_reg_depth": loss_reg,    
         f"loss_grad_depth": loss_grad,
     }
+
+    dist = pred_depth.norm(dim=-1)
+    dist_sum = (dist * gt_depth_mask).sum(dim=[1,2,3])
+    valid_count = gt_depth_mask.sum(dim=[1,2,3])
+    avg_scale = (dist_sum / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)
+    print("pred_scale:",avg_scale)
+    bad_mask = avg_scale < 0.1
+    if bad_mask.any():
+        # depth_conf shape: (B, S, H, W)
+        print("depth_conf (bad only):",
+            predictions["depth_conf"][bad_mask])
+
+    dist_gt = gt_depth.norm(dim=-1)
+    dist_sum_gt = (dist_gt * gt_depth_mask).sum(dim=[1,2,3])
+    valid_count = gt_depth_mask.sum(dim=[1,2,3])
+    avg_scale_gt = (dist_sum_gt / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)
+    print("gt_scale:",avg_scale_gt)
 
     return loss_dict
 
@@ -347,12 +403,18 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     bb, ss, hh, ww, nc = pred.shape
 
     # Compute L2 distance between predicted and ground truth points
-    loss_reg = torch.norm(gt[mask] - pred[mask], dim=-1)
-    loss_reg = check_and_fix_inf_nan(loss_reg, "loss_reg")
+    # mask: (B,S,H,W) bool
+    # conf: (B,S,H,W) (positive)
+    # pred, gt: (B,S,H,W,1)
+    valid_bool = mask > 0          # (B,S,H,W) bool
+    valid = valid_bool.to(pred.dtype)                     # (B,S,H,W)
+    res = torch.norm(pred - gt, dim=-1)             # (B,S,H,W)
+    loss_reg = (res * valid).sum() / valid.sum().clamp_min(1.0)
 
-    # Confidence-weighted loss: gamma * loss * conf - alpha * log(conf)
-    # This encourages the model to be confident on easy examples and less confident on hard ones
-    loss_conf = gamma * loss_reg * conf[mask] - alpha * torch.log(conf[mask])
+    loss_conf_map = gamma * res * conf - alpha * torch.log(conf)   # (B,S,H,W)
+    loss_conf = (loss_conf_map * valid).sum() / valid.sum().clamp_min(1.0)
+
+    loss_reg = check_and_fix_inf_nan(loss_reg, "loss_reg")
     loss_conf = check_and_fix_inf_nan(loss_conf, "loss_conf")
         
     # Initialize gradient loss

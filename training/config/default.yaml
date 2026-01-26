@@ -4,16 +4,16 @@ defaults:
   - _self_
 
 exp_name: exp001
-img_size: 224 #518
+img_size: 448 #518
 num_workers: 4
 seed_value: 38
 accum_steps: 1    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
 patch_size: 14
 val_epoch_freq: 5
-max_img_per_gpu: 6
+max_img_per_gpu: 12
 # img_size:224^2 / accum_steps:2 * max_img_per_gpu: 48 = VRAM:13GB
 
-limit_train_batches: 800
+limit_train_batches: 400
 limit_val_batches: 400
 
 
@@ -33,20 +33,20 @@ data:
       dataset_configs:
         - _target_: data.datasets.tartanair.TartanAirDataset
           split: train
-          len_train: 1000
+          len_train: 10000
           len_test: 100
-          TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
-          # TartanAir_DIR: ../dataset/TartanAir
+          # TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
+          TartanAir_DIR: ../dataset/TartanAir
         #- _target_: data.datasets.tartanair_synthe.TartanAirSyntheDataset
         #  split: train
         #  len_train: 10000
         #  len_test: 100
         #  TartanAir_DIR: ../dataset/TartanAir_Synthe
-        #- _target_: data.datasets.vkitti.VKittiDataset
-        #  split: train
-        #  len_train: 10000
-        #  len_test: 100
-        #  VKitti_DIR: ../dataset/vkitti
+        - _target_: data.datasets.vkitti.VKittiDataset
+          split: train
+          len_train: 10000
+          len_test: 100
+          VKitti_DIR: ../dataset/vkitti
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
     num_workers: ${num_workers}
@@ -62,8 +62,8 @@ data:
           split: test
           len_train: 100
           len_test: 10
-          TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
-          # TartanAir_DIR: ../dataset/TartanAir
+          # TartanAir_DIR: /mnt/c/Users/shuns/Downloads/TartanAir
+          TartanAir_DIR: ../dataset/TartanAir
 
 
 logging:
@@ -83,17 +83,21 @@ logging:
         - loss_camera
         - loss_T
         - loss_R
-        #- loss_FL
+        - loss_FoV
         - loss_conf_depth
         - loss_reg_depth
         - loss_grad_depth
+        - loss_conf_point
+        - loss_reg_point
+        - loss_grad_point
+        - loss_world_size
     val:
       keys_to_log:
         - loss_objective
         - loss_camera
         - loss_T
         - loss_R
-        #- loss_FL
+        - loss_FoV
         - loss_conf_depth
         - loss_reg_depth
         - loss_grad_depth
@@ -103,30 +107,30 @@ logging:
 checkpoint:
   save_dir: logs/${exp_name}/ckpts
   save_freq: 10
-  #resume_checkpoint_path: /home/shun/workspace/xvader/checkpoints/checkpoint.pt
+  #resume_checkpoint_path: logs/exp001/ckpts/checkpoint.pt
   resume_checkpoint_path: checkpoints/mg3/mg3_base_init.pth
-  #resume_checkpoint_path: checkpoints/vggt_vitl.pt
   strict: True
 
 
 loss:
   _target_: loss.MultitaskLoss
   camera: 
-    weight: 3.0
+    weight: 1.0
     loss_type: "l1" # The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.  
     weight_rot: 5.0
   depth:
     weight: 1.0
-    gradient_loss_fn: "unuse" #"grad" 
+    gradient_loss_fn: "grad" #"unuse"  
     valid_range: 0.98
     inv_depth_only: True
-  point: null
   # If you want to enable point, use the following config
-  #point: 
-  #  weight: 1.0
-  #  gradient_loss_fn: "normal" 
-  #  valid_range: 0.98
+  point: 
+    weight: 1.0
+    gradient_loss_fn: "normal" 
+    valid_range: 0.98
   #track: null   
+  world_size:
+    weight: 1.0
 
 
 
@@ -136,13 +140,13 @@ optim:
 
   optimizer:
     _target_: torch.optim.AdamW
-    lr: 1e-5
+    lr: 1e-6
     weight_decay: 0.005
 
   frozen_module_names:
     - "*cam_enc*"
     - "*cam_dec*"
-    - "*depth_tokenizer*"
+    #- "*depth_tokenizer*"
     - "*head*"
     - "*pretrained*"
     #- "*depth_fusion_blk*"

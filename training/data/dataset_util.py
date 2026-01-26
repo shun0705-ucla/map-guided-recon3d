@@ -348,6 +348,7 @@ def depth_to_world_coords_points(
 
     # Valid depth mask
     point_mask = depth_map > eps
+    #point_mask = np.logical_and(depth_map > eps, depth_map < 250.0)
 
     # Convert depth map to camera coordinates
     cam_coords_points = depth_to_cam_coords_points(depth_map, intrinsic)

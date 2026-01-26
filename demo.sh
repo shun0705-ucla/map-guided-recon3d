@@ -1,7 +1,7 @@
 #python demo.py \
 #    --image input/1636351539931534.png input/1636351649229239.png \
 #    --config configs/mg3-base.yaml \
-#    --checkpoint logs/exp001/ckpts/checkpoint.pt \
+#    --checkpoint checkpoints/mg3/mg3_base_init.pth \
 #    --outdir output \
 #    --resolution 448 \
 

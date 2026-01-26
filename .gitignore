@@ -213,5 +213,6 @@ input/
 logs/
 output/
 trash/
+debug_batches/
 
 #*.onnx

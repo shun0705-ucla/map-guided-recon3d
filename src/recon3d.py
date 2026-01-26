@@ -287,6 +287,7 @@ class MapGuidedRecon3D(nn.Module):
             c2w, ixt = pose_encoding_to_extri_intri(pose_enc, (H, W))
             output.extrinsics = affine_inverse(c2w)
             output.intrinsics = ixt
+            output.pose_enc = pose_enc
 
         return output
 
